@@ -1,0 +1,3 @@
+[submodule "minhook-sys/minhook"]
+	path = minhook-sys/minhook
+	url = https://github.com/TsudaKageyu/minhook.git

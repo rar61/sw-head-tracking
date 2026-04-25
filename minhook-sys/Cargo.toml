@@ -1,0 +1,13 @@
+[package]
+name = "minhook-sys"
+version = "0.1.0+minhook1.3.4"
+edition = "2024"
+links = "minhook"
+
+[features]
+build-from-source = ["dep:cmake"]
+static = []
+
+[build-dependencies]
+cmake = { version = "0.1", optional = true }
+build-rs = "0.3"
