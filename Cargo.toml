@@ -20,6 +20,9 @@ name = "sw-head-tracking"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 minhook-sys = { path = "minhook-sys", features = [ "build-from-source", "static" ] }
 freetrack-client = { path = "freetrack-client" }
