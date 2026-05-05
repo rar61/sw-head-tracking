@@ -15,6 +15,9 @@ pub struct FTClient {
     mutex: HANDLE
 }
 
+unsafe impl Send for FTClient {}
+unsafe impl Sync for FTClient {}
+
 impl FTClient {
     pub fn new() -> Result<Self, windows::core::Error> {
         unsafe {
@@ -50,7 +53,7 @@ impl FTClient {
         }
     }
 
-    pub fn get_data(&mut self) -> Option<FTData> {
+    pub fn get_data(&self) -> Option<FTData> {
         unsafe {
             if WaitForSingleObject(self.mutex, MUTEX_WAIT_TIME) == WAIT_OBJECT_0 {
                 let data = self.view.read_unaligned();
@@ -62,7 +65,7 @@ impl FTClient {
         }
     }
 
-    pub fn get_slim_data(&mut self) -> Option<FTSlimData> {
+    pub fn get_slim_data(&self) -> Option<FTSlimData> {
         unsafe {
             if WaitForSingleObject(self.mutex, MUTEX_WAIT_TIME) == WAIT_OBJECT_0 {
                 let data = (self.view as *mut FTSlimData).read_unaligned();

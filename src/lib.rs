@@ -1,19 +1,19 @@
 use freetrack_client::FTClient;
 use minhook_sys::{MH_CreateHook, MH_EnableHook, MH_Initialize};
 
-use std::{ffi::c_void, mem, ptr::{self, null_mut}};
+use std::{ffi::c_void, mem, ptr::{self, null_mut}, sync::OnceLock};
 
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
 
 const FUNCTION_OFFSET: usize = 0x717280;
 
-static mut ORIGINAL: Option<fn(*mut c_void, *mut c_void, f32, i32)> = None;
-static mut CLIENT: Option<FTClient> = None;
+static ORIGINAL: OnceLock<fn(*mut c_void, *mut c_void, f32, i32)> = OnceLock::new();
+static CLIENT: OnceLock<FTClient> = OnceLock::new();
 
 extern "C" fn detour(data: *mut c_void, data2: *mut c_void, time: f32, var2: i32) {
-    if let Some(o) = unsafe { ORIGINAL } {
+    if let Some(o) = ORIGINAL.get() {
         if unsafe { is_seated(data) & !(is_in_scope(data) | is_third_person(data)) } {
-            if let Some(c) = unsafe { &mut * &raw mut CLIENT } {
+            if let Some(c) = CLIENT.get() {
                 if let Some(d)= c.get_slim_data() {
                     unsafe {
                         set_pitch(data, d.pitch);
@@ -66,6 +66,9 @@ unsafe fn set_roll(transform: *mut c_void, roll: f32) {
 
 #[unsafe(no_mangle)]
 extern "system" fn initialize(_parameter: *mut c_void) -> u32 {
+    let ft_client = FTClient::new().unwrap();
+    if CLIENT.set(ft_client).is_err() { panic!("freetrack client already initialized") };
+
     unsafe {
         if MH_Initialize() != 0 {
             panic!();
@@ -78,14 +81,12 @@ extern "system" fn initialize(_parameter: *mut c_void) -> u32 {
         }
         
         if !original.is_null() {
-            ORIGINAL = Some(mem::transmute(original))
+            ORIGINAL.set(mem::transmute(original)).unwrap();
         }
         
         if MH_EnableHook(null_mut()) != 0 {
             panic!();
         }
-        
-        CLIENT = Some(FTClient::new().unwrap());
     }
 
     0
