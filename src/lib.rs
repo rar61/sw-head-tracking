@@ -3,10 +3,6 @@ use minhook_sys::{MH_CreateHook, MH_EnableHook, MH_Initialize};
 
 use std::{ffi::c_void, mem, ptr::{self, null_mut}, sync::OnceLock};
 
-use windows::Win32::System::LibraryLoader::GetModuleHandleA;
-
-const FUNCTION_OFFSET: usize = 0x717280;
-
 static ORIGINAL: OnceLock<fn(*mut c_void, *mut c_void, f32, i32)> = OnceLock::new();
 static CLIENT: OnceLock<FTClient> = OnceLock::new();
 
@@ -65,7 +61,7 @@ unsafe fn set_roll(transform: *mut c_void, roll: f32) {
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn initialize(_parameter: *mut c_void) -> u32 {
+extern "system" fn initialize(parameter: *mut c_void) -> u32 {
     let ft_client = FTClient::new().unwrap();
     if CLIENT.set(ft_client).is_err() { panic!("freetrack client already initialized") };
 
@@ -73,10 +69,9 @@ extern "system" fn initialize(_parameter: *mut c_void) -> u32 {
         if MH_Initialize() != 0 {
             panic!();
         }
-        let base = GetModuleHandleA(None).unwrap();
-        let target_function = base.0.byte_add(FUNCTION_OFFSET);
+        let target_function = *parameter.cast::<usize>().as_mut().unwrap();
         let mut original = null_mut();
-        if MH_CreateHook(target_function, detour as *mut c_void, &mut original) != 0 {
+        if MH_CreateHook(target_function as *mut c_void, detour as *mut c_void, &mut original) != 0 {
             panic!();
         }
         

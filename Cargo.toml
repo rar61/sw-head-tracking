@@ -12,7 +12,8 @@ features = [
     "Win32_System_ProcessStatus",
     "Win32_Security",
     "Win32_System_Diagnostics_Debug",
-    "Win32_Globalization"
+    "Win32_Globalization",
+    "Win32_System_SystemInformation"
 ]
 
 [package]

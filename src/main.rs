@@ -10,7 +10,11 @@ use windows::Win32::System::{
     ProcessStatus::{EnumProcessModules, GetModuleBaseNameW},
     Threading::{LPTHREAD_START_ROUTINE, INFINITE, PROCESS_ALL_ACCESS, CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject}
 };
+use pattern::{Pattern, Process};
 
+mod pattern;
+
+const TARGET: Pattern<'_> = pattern!("4c 8b dc 55 57 49 8d ab f8 fc ff ff");
 
 fn main() {
     let args: Vec<_> = env::args_os().collect();
@@ -18,11 +22,19 @@ fn main() {
 
     unsafe {
         let process_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid).unwrap();
-        inject_dll(process_handle, "sw_head_tracking.dll").unwrap();
+        let process = Process::new(process_handle);
+
+        let results = process.scan(TARGET, 128 << 10).unwrap();
+
+        if results.len() > 1 { panic!() }
+
+        let addr = *results.first().unwrap();
+
+        inject_dll(process_handle, "sw_head_tracking.dll", addr).unwrap();
     }
 }
 
-fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>) -> Result<(), windows::core::Error> {
+fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, targer_addr: usize) -> Result<(), windows::core::Error> {
     let dll_path = dll_path.as_ref();
     let path_buf: Vec<u16> = dll_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
     unsafe {
@@ -42,7 +54,7 @@ fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>) -> Result<(), 
         let remote_module = get_remote_module(process_handle, w!("sw_head_tracking.dll"))?;
         let remote_initialize = remote_module.0.byte_add(offset);
 
-        call_remote_raw(process_handle, Some(mem::transmute(remote_initialize)), None)?;
+        call_remote(process_handle, Some(mem::transmute(remote_initialize)), &targer_addr)?;
     }
 
     Ok(())
