@@ -28,3 +28,5 @@ crate-type = ["cdylib"]
 minhook-sys = { path = "minhook-sys", features = [ "build-from-source", "static" ] }
 freetrack-client = { path = "freetrack-client" }
 windows.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1"
