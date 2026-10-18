@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: release
+    outputs:
+      artifact-id:
+        description: ID of the uploaded build artifact
+        value: ${{ jobs.build.outputs.artifact-id }}
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Build profile
+        type: choice
+        options: [release, debug]
+        default: release
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Build
+        run: cargo build --profile ${{ inputs.profile }}
+
+      - id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64-${{ inputs.profile }}
+          path: |
+            target/${{ inputs.profile }}/sw-head-tracking.exe
+            target/${{ inputs.profile }}/sw_head_tracking.dll
+          if-no-files-found: error
