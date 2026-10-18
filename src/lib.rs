@@ -1,10 +1,15 @@
 use freetrack_client::FTClient;
 use minhook_sys::{MH_CreateHook, MH_EnableHook, MH_Initialize};
 
-use std::{ffi::c_void, mem, ptr::{self, null_mut}, sync::OnceLock};
+use std::{ffi::c_void, mem, ptr::{self, null_mut}, sync::{OnceLock, atomic::{AtomicBool, Ordering}}};
+
+use crate::dll_config::DllConfig;
+
+mod dll_config;
 
 static ORIGINAL: OnceLock<fn(*mut c_void, *mut c_void, f32, i32)> = OnceLock::new();
 static CLIENT: OnceLock<FTClient> = OnceLock::new();
+static ENABLE_ROLL: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn detour(data: *mut c_void, data2: *mut c_void, time: f32, var2: i32) {
     if let Some(o) = ORIGINAL.get() {
@@ -14,14 +19,13 @@ extern "C" fn detour(data: *mut c_void, data2: *mut c_void, time: f32, var2: i32
                     unsafe {
                         set_pitch(data, d.pitch);
                         set_yaw(data, -d.yaw);
-                        set_roll(data, d.roll);
+                        if ENABLE_ROLL.load(Ordering::Relaxed) { set_roll(data, d.roll) };
                     }
                 }
             }
         }
         o(data, data2, time, var2)
     }
-
 }
 
 unsafe fn is_seated(transform: *mut c_void) -> bool {
@@ -69,9 +73,13 @@ extern "system" fn initialize(parameter: *mut c_void) -> u32 {
         if MH_Initialize() != 0 {
             panic!();
         }
-        let target_function = *parameter.cast::<usize>().as_mut().unwrap();
+
+        let config = parameter.cast::<DllConfig>().as_mut().unwrap();
+
+        ENABLE_ROLL.store(config.enable_roll, Ordering::Relaxed);
+
         let mut original = null_mut();
-        if MH_CreateHook(target_function as *mut c_void, detour as *mut c_void, &mut original) != 0 {
+        if MH_CreateHook(config.target_address, detour as *mut c_void, &mut original) != 0 {
             panic!();
         }
         
