@@ -1,6 +1,9 @@
-use std::{env, ffi::c_void, iter, mem, os::windows::ffi::OsStrExt, path::Path};
+#![windows_subsystem = "windows"]
 
-use windows::core::{s, w, PCWSTR};
+use std::{ffi::c_void, iter, mem, os::windows::ffi::OsStrExt, path::Path};
+
+use windows::Win32::System::Threading::{CREATE_SUSPENDED, CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW};
+use windows::core::{Owned, PCWSTR, s, w};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Foundation::{HANDLE, HMODULE, ERROR_MOD_NOT_FOUND, MAX_PATH, WAIT_FAILED, CloseHandle, FreeLibrary};
 use windows::Win32::System::{
@@ -8,42 +11,81 @@ use windows::Win32::System::{
     LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
     Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx},
     ProcessStatus::{EnumProcessModules, GetModuleBaseNameW},
-    Threading::{LPTHREAD_START_ROUTINE, INFINITE, PROCESS_ALL_ACCESS, CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject}
+    Threading::{LPTHREAD_START_ROUTINE, INFINITE, CreateRemoteThread, GetExitCodeThread, WaitForSingleObject}
 };
-use pattern::{Pattern, Process};
 
+use crate::dll_config::DllConfig;
+use crate::pattern::{Pattern, Process};
+use crate::config::{CONFIG_PATH, Config};
+
+mod config;
+mod dll_config;
 mod pattern;
+
+type WinResult<T> = windows::core::Result<T>;
 
 const TARGET: Pattern<'_> = pattern!("4c 8b dc 55 57 49 8d ab f8 fc ff ff");
 
 fn main() {
-    let args: Vec<_> = env::args_os().collect();
-    let pid = args[1].to_str().unwrap().parse().unwrap();
+    let mut config = Config::default();
+    config.from_file(CONFIG_PATH);
+    config.from_args();
+
+    let (process_handle, thread_handle) = create_process(&config.exe_path, true).unwrap();
 
     unsafe {
-        let process_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid).unwrap();
-        let process = Process::new(process_handle);
-
+        let process = Process::new(*process_handle);
         let results = process.scan(TARGET, 128 << 10).unwrap();
-
         if results.len() > 1 { panic!() }
 
-        let addr = *results.first().unwrap();
+        let target_address = *results.first().unwrap() as *mut c_void;
 
-        inject_dll(process_handle, "sw_head_tracking.dll", addr).unwrap();
+        let dll_config = DllConfig { target_address, enable_roll: config.enable_roll };
+
+        inject_dll(*process_handle, config.dll_path, dll_config).unwrap();
+
+        ResumeThread(*thread_handle);
     }
 }
 
-fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, targer_addr: usize) -> Result<(), windows::core::Error> {
+fn create_process(exe_path: impl AsRef<Path>, create_suspended: bool) -> WinResult<(Owned<HANDLE>, Owned<HANDLE>)> {
+    let path_buf: Vec<u16> = exe_path.as_ref().as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let creation_flags = if create_suspended { CREATE_SUSPENDED } else { PROCESS_CREATION_FLAGS::default() };
+
+    let mut startup_info = STARTUPINFOW::default();
+    startup_info.cb = mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process_info = PROCESS_INFORMATION::default();
+
+    unsafe {
+        CreateProcessW(
+            PCWSTR(path_buf.as_ptr()),
+            None, None, None,
+            false,
+            creation_flags,
+            None, None,
+            &startup_info,
+            &mut process_info
+        )?;
+    }
+
+    let process_handle = unsafe { Owned::new(process_info.hProcess) };
+    let thread_handle = unsafe { Owned::new(process_info.hThread) };        
+
+    Ok((process_handle, thread_handle))
+}
+
+unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config: DllConfig) -> WinResult<()> {
     let dll_path = dll_path.as_ref();
     let path_buf: Vec<u16> = dll_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let dll_file_name = dll_path.file_name().unwrap_or_default();
+    let name_buf: Vec<u16> = dll_file_name.encode_wide().chain(iter::once(0)).collect();
     unsafe {
         let kernel32_handle = GetModuleHandleW(w!("kernel32.dll"))?;
         let load_library = GetProcAddress(kernel32_handle, s!("LoadLibraryW")).ok_or(windows::core::Error::from_thread())?;
 
         call_remote(process_handle, Some(mem::transmute(load_library)), path_buf.as_slice())?;
         
-        let dll_handle = LoadLibraryW(PCWSTR::from_raw(path_buf.as_ptr()))?;
+        let dll_handle = LoadLibraryW(PCWSTR(path_buf.as_ptr()))?;
         let Some(initialize) = GetProcAddress(dll_handle, s!("initialize")) else {
             return Err(windows::core::Error::from_thread());
         };
@@ -51,16 +93,16 @@ fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, targer_addr: u
 
         let offset = initialize as usize - dll_handle.0 as usize;
 
-        let remote_module = get_remote_module(process_handle, w!("sw_head_tracking.dll"))?;
+        let remote_module = get_remote_module(process_handle, PCWSTR(name_buf.as_ptr()))?;
         let remote_initialize = remote_module.0.byte_add(offset);
 
-        call_remote(process_handle, Some(mem::transmute(remote_initialize)), &targer_addr)?;
+        call_remote(process_handle, Some(mem::transmute(remote_initialize)), &config)?;
     }
 
     Ok(())
 }
 
-unsafe fn call_remote_raw(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: Option<*const c_void>) -> Result<u32, windows::core::Error> {
+unsafe fn call_remote_raw(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: Option<*const c_void>) -> WinResult<u32> {
     unsafe {
         let thread_handle = CreateRemoteThread(process_handle, None, 0, remote_proc_address, parameter, 0, None)?;
         if WaitForSingleObject(thread_handle, INFINITE) == WAIT_FAILED {
@@ -76,7 +118,7 @@ unsafe fn call_remote_raw(process_handle: HANDLE, remote_proc_address: LPTHREAD_
     }
 }
 
-unsafe fn call_remote<T: ?Sized>(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: &T) -> Result<u32, windows::core::Error> {
+unsafe fn call_remote<T: ?Sized>(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: &T) -> WinResult<u32> {
     unsafe {
         let ptr = parameter as *const T as *const c_void;
         let size = size_of_val(parameter);
@@ -95,7 +137,7 @@ unsafe fn call_remote<T: ?Sized>(process_handle: HANDLE, remote_proc_address: LP
     }
 }
 
-unsafe fn get_remote_module(process_handle: HANDLE, module_name: PCWSTR) -> Result<HMODULE, windows::core::Error> {
+unsafe fn get_remote_module(process_handle: HANDLE, module_name: PCWSTR) -> WinResult<HMODULE> {
     unsafe {
         let mut modules = vec![Default::default(); 128];
         let mut needed = 0;
