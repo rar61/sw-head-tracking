@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 pub const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_EXE_PATH: &str = "stormworks64.exe";
-const DEFAULT_DLL_PATH: &str = concat!(env!("CARGO_CRATE_NAME"), ".dll");
+const DEFAULT_DLL_PATH: &str = "sw_head_tracking.dll";
 
 pub struct Config {
     pub enable_roll: bool,

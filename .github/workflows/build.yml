@@ -41,6 +41,6 @@ jobs:
         with:
           name: windows-x86_64-${{ inputs.profile }}
           path: |
-            target/${{ inputs.profile }}/sw-head-tracking.exe
+            target/${{ inputs.profile }}/sw-loader.exe
             target/${{ inputs.profile }}/sw_head_tracking.dll
           if-no-files-found: error
