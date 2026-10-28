@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, fmt::Display, fs, io, path::{Path, PathBuf}};
+use std::{env, error::Error, ffi::OsString, fmt::Display, fs, io, path::{Path, PathBuf}};
 
 use serde::Deserialize;
 
@@ -97,6 +97,8 @@ pub enum ConfigError {
     Io { path: PathBuf, source: io::Error },
     Parse { path: PathBuf, source: toml::de::Error }
 }
+
+impl Error for ConfigError { }
 
 impl Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

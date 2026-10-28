@@ -1,22 +1,33 @@
 #![windows_subsystem = "windows"]
 
-use std::{ffi::c_void, iter, mem, os::windows::ffi::OsStrExt, path::Path};
+use std::error::Error;
+use std::ffi::{OsStr, c_void};
+use std::io::{self, Write};
+use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+use std::panic;
+use std::process::ExitCode;
+use std::{iter, mem, path::Path};
 
-use windows::Win32::System::Threading::{CREATE_SUSPENDED, CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW};
 use windows::core::{Owned, PCWSTR, s, w};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
-use windows::Win32::Foundation::{HANDLE, HMODULE, ERROR_MOD_NOT_FOUND, MAX_PATH, WAIT_FAILED, CloseHandle, FreeLibrary};
+use windows::Win32::Foundation::{CloseHandle, ERROR_MOD_NOT_FOUND, FreeLibrary, HANDLE, HMODULE, INVALID_HANDLE_VALUE, MAX_PATH, WAIT_FAILED};
 use windows::Win32::System::{
+    Console::{ATTACH_PARENT_PROCESS, AttachConsole},
     Diagnostics::Debug::WriteProcessMemory,
     LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
     Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx},
     ProcessStatus::{EnumProcessModules, GetModuleBaseNameW},
-    Threading::{LPTHREAD_START_ROUTINE, INFINITE, CreateRemoteThread, GetExitCodeThread, WaitForSingleObject}
+    Threading::{
+        LPTHREAD_START_ROUTINE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW, CREATE_SUSPENDED,
+        INFINITE, CreateProcessW, CreateRemoteThread, GetExitCodeThread, ResumeThread, WaitForSingleObject
+    }
 };
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 
+use crate::config::Command::Run;
 use crate::dll_config::DllConfig;
 use crate::pattern::{Pattern, Process};
-use crate::config::{CONFIG_PATH, Config};
+use crate::config::{Config, print_help};
 
 mod config;
 mod dll_config;
@@ -26,30 +37,89 @@ type WinResult<T> = windows::core::Result<T>;
 
 const TARGET: Pattern<'_> = pattern!("4c 8b dc 55 57 49 8d ab f8 fc ff ff");
 
-fn main() {
-    let mut config = Config::default();
-    config.from_file(CONFIG_PATH);
-    config.from_args();
+fn main() -> ExitCode {
+    panic::set_hook(Box::new(|info| report_error(&info.to_string())));
 
-    let (process_handle, thread_handle) = create_process(&config.exe_path, true).unwrap();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            report_error(&e.to_string());
+            ExitCode::FAILURE
+        },
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let Run(config) = Config::load()? else {
+        print_help();
+        return Ok(());
+    };
+
+    let (process_handle, thread_handle) = create_process(&config.exe_path, true)?;
 
     unsafe {
         let process = Process::new(*process_handle);
-        let results = process.scan(TARGET, 128 << 10).unwrap();
-        if results.len() > 1 { panic!() }
+        let results = process.scan(TARGET, 128 << 10)?;
 
-        let target_address = *results.first().unwrap() as *mut c_void;
+        if results.len() > 1 {
+            return Err(format!("pattern scan found {} matches (expected 1), the game build maybe unsupported", results.len()).into());
+        }
 
+        let target_address = *results.first()
+            .ok_or_else(|| Box::<dyn Error>::from("pattern scan found no matches; the game build may be unsupported"))? as *mut c_void;
         let dll_config = DllConfig { target_address, enable_roll: config.enable_roll };
-
-        inject_dll(*process_handle, config.dll_path, dll_config).unwrap();
+        inject_dll(*process_handle, config.dll_path, dll_config)?;
 
         ResumeThread(*thread_handle);
+    }
+
+    Ok(())
+}
+
+fn encode_wide(os_str: impl AsRef<OsStr>) -> Vec<u16> {
+    os_str.as_ref().encode_wide().chain(iter::once(0)).collect()
+}
+
+fn report_error(msg: &str) {
+    if !write_to_stderr(msg) {
+        message_box("Error", msg);
+    }
+}
+
+fn write_to_stderr(msg: &str) -> bool {
+    fn is_valid_handle(handle: *mut c_void) -> bool {
+        !handle.is_null() && handle != INVALID_HANDLE_VALUE.0
+    }
+
+    if is_valid_handle(io::stderr().as_raw_handle()) {
+        return writeln!(io::stderr(), "error: {msg}").is_ok();
+    }
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() && is_valid_handle(io::stderr().as_raw_handle()) {
+            return writeln!(io::stderr(), "error: {msg}").is_ok()
+        }
+    }
+
+    false
+}
+
+fn message_box(title: &str, message: &str) {
+    let title = encode_wide(title);
+    let message = encode_wide(message);
+
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND
+        );
     }
 }
 
 fn create_process(exe_path: impl AsRef<Path>, create_suspended: bool) -> WinResult<(Owned<HANDLE>, Owned<HANDLE>)> {
-    let path_buf: Vec<u16> = exe_path.as_ref().as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let path_buf: Vec<u16> = encode_wide(exe_path.as_ref().as_os_str());
     let creation_flags = if create_suspended { CREATE_SUSPENDED } else { PROCESS_CREATION_FLAGS::default() };
 
     let mut startup_info = STARTUPINFOW::default();
@@ -76,12 +146,12 @@ fn create_process(exe_path: impl AsRef<Path>, create_suspended: bool) -> WinResu
 
 unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config: DllConfig) -> WinResult<()> {
     let dll_path = dll_path.as_ref();
-    let path_buf: Vec<u16> = dll_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let path_buf: Vec<u16> = encode_wide(dll_path.as_os_str());
     let dll_file_name = dll_path.file_name().unwrap_or_default();
-    let name_buf: Vec<u16> = dll_file_name.encode_wide().chain(iter::once(0)).collect();
+    let name_buf: Vec<u16> = encode_wide(dll_file_name);
     unsafe {
         let kernel32_handle = GetModuleHandleW(w!("kernel32.dll"))?;
-        let load_library = GetProcAddress(kernel32_handle, s!("LoadLibraryW")).ok_or(windows::core::Error::from_thread())?;
+        let load_library = GetProcAddress(kernel32_handle, s!("LoadLibraryW")).ok_or_else(|| windows::core::Error::from_thread())?;
 
         call_remote(process_handle, Some(mem::transmute(load_library)), path_buf.as_slice())?;
         
