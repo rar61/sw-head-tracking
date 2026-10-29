@@ -2,8 +2,12 @@ use std::{ffi::c_void, mem};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY};
+use windows::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE,
+    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY
+};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows::core::Owned;
 
 #[derive(Clone, Copy)]
 pub struct Pattern<'a> {
@@ -154,12 +158,12 @@ pub struct MemoryRegion {
     pub size: usize
 }
 
-pub struct Process {
-    handle: HANDLE
+pub struct Process<'a> {
+    handle: &'a Owned<HANDLE>
 }
 
-impl Process {
-    pub unsafe fn new(handle: HANDLE) -> Self {
+impl<'a> Process<'a> {
+    pub unsafe fn new(handle: &'a Owned<HANDLE>) -> Self {
         Self { handle }
     }
 
@@ -174,7 +178,7 @@ impl Process {
         while addr < max {
             let mut memory_info = MEMORY_BASIC_INFORMATION::default();
             unsafe {
-                let n = VirtualQueryEx(self.handle, Some(addr as *const c_void), &mut memory_info, mem::size_of::<MEMORY_BASIC_INFORMATION>());
+                let n = VirtualQueryEx(**self.handle, Some(addr as *const c_void), &mut memory_info, mem::size_of::<MEMORY_BASIC_INFORMATION>());
                 if n == 0 { return Err(windows::core::Error::from_thread()) };
             }
 
@@ -196,7 +200,7 @@ impl Process {
     pub fn read(&self, addr: usize, buf: &mut [u8]) -> windows::core::Result<usize> {
         let mut read = 0;
         unsafe {
-            ReadProcessMemory(self.handle, addr as *const c_void, buf.as_mut_ptr().cast(), buf.len(), Some(&mut read))?;
+            ReadProcessMemory(**self.handle, addr as *const c_void, buf.as_mut_ptr().cast(), buf.len(), Some(&mut read))?;
         }
 
         Ok(read)

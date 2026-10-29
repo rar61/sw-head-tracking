@@ -10,7 +10,7 @@ use std::{iter, mem, path::Path};
 
 use windows::core::{Owned, PCWSTR, s, w};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
-use windows::Win32::Foundation::{CloseHandle, ERROR_MOD_NOT_FOUND, FreeLibrary, HANDLE, HMODULE, INVALID_HANDLE_VALUE, MAX_PATH, WAIT_FAILED};
+use windows::Win32::Foundation::{ERROR_MOD_NOT_FOUND, HANDLE, HMODULE, INVALID_HANDLE_VALUE, MAX_PATH, WAIT_FAILED};
 use windows::Win32::System::{
     Console::{ATTACH_PARENT_PROCESS, AttachConsole},
     Diagnostics::Debug::WriteProcessMemory,
@@ -58,7 +58,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let (process_handle, thread_handle) = create_process(&config.exe_path, true)?;
 
     unsafe {
-        let process = Process::new(*process_handle);
+        let process = Process::new(&process_handle);
         let results = process.scan(TARGET, 128 << 10)?;
 
         if results.len() > 1 {
@@ -155,11 +155,10 @@ unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config:
 
         call_remote(process_handle, Some(mem::transmute(load_library)), path_buf.as_slice())?;
         
-        let dll_handle = LoadLibraryW(PCWSTR(path_buf.as_ptr()))?;
-        let Some(initialize) = GetProcAddress(dll_handle, s!("initialize")) else {
+        let dll_handle = Owned::new(LoadLibraryW(PCWSTR(path_buf.as_ptr()))?);
+        let Some(initialize) = GetProcAddress(*dll_handle, s!("initialize")) else {
             return Err(windows::core::Error::from_thread());
         };
-        FreeLibrary(dll_handle)?;
 
         let offset = initialize as usize - dll_handle.0 as usize;
 
@@ -174,15 +173,13 @@ unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config:
 
 unsafe fn call_remote_raw(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: Option<*const c_void>) -> WinResult<u32> {
     unsafe {
-        let thread_handle = CreateRemoteThread(process_handle, None, 0, remote_proc_address, parameter, 0, None)?;
-        if WaitForSingleObject(thread_handle, INFINITE) == WAIT_FAILED {
+        let thread_handle = Owned::new(CreateRemoteThread(process_handle, None, 0, remote_proc_address, parameter, 0, None)?);
+        if WaitForSingleObject(*thread_handle, INFINITE) == WAIT_FAILED {
             return Err(windows::core::Error::from_thread());
         }
     
         let mut result = 0;
-        GetExitCodeThread(thread_handle, &mut result)?;
-
-        CloseHandle(thread_handle)?;
+        GetExitCodeThread(*thread_handle, &mut result)?;
 
         Ok(result)
     }
