@@ -1,11 +1,13 @@
 use freetrack_client::FTClient;
-use minhook_sys::{MH_CreateHook, MH_EnableHook, MH_Initialize};
+use minhook_sys::{MH_ALL_HOOKS, MH_CreateHook, MH_EnableHook, MH_Initialize, MH_STATUS_MH_OK};
 
 use std::{ffi::c_void, mem, ptr::{self, null_mut}, sync::{OnceLock, atomic::{AtomicBool, Ordering}}};
 
-use crate::dll_config::DllConfig;
+use crate::{shared::InitParams, shared::InitStatus};
 
-mod dll_config;
+mod shared;
+
+static INIT_STARTED: AtomicBool = AtomicBool::new(false);
 
 static ORIGINAL: OnceLock<fn(*mut c_void, *mut c_void, f32, i32)> = OnceLock::new();
 static CLIENT: OnceLock<FTClient> = OnceLock::new();
@@ -66,31 +68,40 @@ unsafe fn set_roll(transform: *mut c_void, roll: f32) {
 
 #[unsafe(no_mangle)]
 extern "system" fn initialize(parameter: *mut c_void) -> u32 {
-    let ft_client = FTClient::new().unwrap();
-    if CLIENT.set(ft_client).is_err() { panic!("freetrack client already initialized") };
+    if INIT_STARTED.swap(true, Ordering::Relaxed) {
+        return InitStatus::AlreadyStarted as u32;
+    }
+
+    let Ok(ft_client) = FTClient::new() else { return InitStatus::FreeTrackInitError as u32; };
+    let _ = CLIENT.set(ft_client);
 
     unsafe {
-        if MH_Initialize() != 0 {
-            panic!();
+        let status = MH_Initialize();
+        if status != MH_STATUS_MH_OK {
+            return InitStatus::from_mh_status(status) as u32;
         }
 
-        let config = parameter.cast::<DllConfig>().as_mut().unwrap();
+        let Some(config) = parameter.cast::<InitParams>().as_mut() else {
+            return InitStatus::ParameterIsNull as u32;
+        };
 
         ENABLE_ROLL.store(config.enable_roll, Ordering::Relaxed);
 
         let mut original = null_mut();
-        if MH_CreateHook(config.target_address, detour as *mut c_void, &mut original) != 0 {
-            panic!();
+        let status = MH_CreateHook(config.target_address, detour as *mut c_void, &mut original);
+        if status != MH_STATUS_MH_OK {
+            return InitStatus::from_mh_status(status) as u32;
         }
         
         if !original.is_null() {
-            ORIGINAL.set(mem::transmute(original)).unwrap();
+            let _ = ORIGINAL.set(mem::transmute(original));
         }
         
-        if MH_EnableHook(null_mut()) != 0 {
-            panic!();
+        let status = MH_EnableHook(MH_ALL_HOOKS);
+        if status != MH_STATUS_MH_OK {
+            return  InitStatus::from_mh_status(status) as u32;
         }
     }
 
-    0
+    InitStatus::Ok as u32
 }

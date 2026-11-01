@@ -25,13 +25,13 @@ use windows::Win32::System::{
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW};
 
 use crate::config::Command::Run;
-use crate::dll_config::DllConfig;
+use crate::shared::{InitParams, InitStatus};
 use crate::pattern::{Pattern, Process};
 use crate::config::{Config, print_help};
 
 mod config;
-mod dll_config;
 mod pattern;
+mod shared;
 
 type WinResult<T> = windows::core::Result<T>;
 
@@ -67,8 +67,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         let target_address = *results.first()
             .ok_or_else(|| Box::<dyn Error>::from("pattern scan found no matches; the game build may be unsupported"))? as *mut c_void;
-        let dll_config = DllConfig { target_address, enable_roll: config.enable_roll };
-        inject_dll(*process_handle, config.dll_path, dll_config)?;
+        let dll_config = InitParams { target_address, enable_roll: config.enable_roll };
+        let status: InitStatus = inject_dll(*process_handle, config.dll_path, dll_config)?.try_into()?;
+
+        if !status.is_ok() {
+            return Err(status.to_string().into());
+        }
 
         ResumeThread(*thread_handle);
     }
@@ -144,11 +148,13 @@ fn create_process(exe_path: impl AsRef<Path>, create_suspended: bool) -> WinResu
     Ok((process_handle, thread_handle))
 }
 
-unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config: DllConfig) -> WinResult<()> {
+unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config: InitParams) -> WinResult<u32> {
     let dll_path = dll_path.as_ref();
     let path_buf: Vec<u16> = encode_wide(dll_path.as_os_str());
     let dll_file_name = dll_path.file_name().unwrap_or_default();
     let name_buf: Vec<u16> = encode_wide(dll_file_name);
+
+    let status;
     unsafe {
         let kernel32_handle = GetModuleHandleW(w!("kernel32.dll"))?;
         let load_library = GetProcAddress(kernel32_handle, s!("LoadLibraryW")).ok_or_else(|| windows::core::Error::from_thread())?;
@@ -165,10 +171,10 @@ unsafe fn inject_dll(process_handle: HANDLE, dll_path: impl AsRef<Path>, config:
         let remote_module = get_remote_module(process_handle, PCWSTR(name_buf.as_ptr()))?;
         let remote_initialize = remote_module.0.byte_add(offset);
 
-        call_remote(process_handle, Some(mem::transmute(remote_initialize)), &config)?;
+        status = call_remote(process_handle, Some(mem::transmute(remote_initialize)), &config)?;
     }
 
-    Ok(())
+    Ok(status)
 }
 
 unsafe fn call_remote_raw(process_handle: HANDLE, remote_proc_address: LPTHREAD_START_ROUTINE, parameter: Option<*const c_void>) -> WinResult<u32> {
